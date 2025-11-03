@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seamless Iframe Switcher</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Ensure the body and html take up the full viewport and remove default margins */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; 
+            font-family: 'Inter', sans-serif;
+            background-color: #1f2937;
+        }
+        
+        /* Ensure the iframe is truly fullscreen and seamless */
+        #contentFrame {
+            border: none;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Styling for the dropdown container to float above the iframe */
+        #dropdownContainer {
+            position: fixed;
+            top: 1rem;
+            left: 1rem;
+            z-index: 100;
+            background-color: rgba(255, 255, 255, 0.95);
+            padding: 0.5rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+            backdrop-filter: blur(5px);
+        }
+
+        /* Styling for the select element for resizeability and aesthetic */
+        #siteSelector {
+            font-size: 0.875rem;
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+            appearance: none;
+            background-color: transparent;
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+            max-width: 180px;
+        }
+
+        #siteSelector:hover {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Iframe Container -->
+    <iframe id="contentFrame" src="about:blank" allowfullscreen></iframe>
+
+    <!-- Dropdown Selector Container (Top Left) -->
+    <div id="dropdownContainer">
+        <select id="siteSelector" title="Select a website to load">
+            <!-- Options will be populated by JavaScript -->
+        </select>
+    </div>
+
+    <script>
+        // Environment Setup (Required for runtime, not used by this app)
+        const appId = (typeof window.__app_id !== 'undefined') ? window.__app_id : 'default-app-id';
+        const firebaseConfig = (typeof window.__firebase_config !== 'undefined') ? JSON.parse(window.__firebase_config) : {};
+        const authToken = (typeof window.__initial_auth_token !== 'undefined') ? window.__initial_auth_token : null;
+
+        const siteSelector = document.getElementById('siteSelector');
+        const contentFrame = document.getElementById('contentFrame');
+
+        /**
+         * Parses the sites.txt content string into an array of site objects.
+         * Format expected: Name|"URL"
+         */
+        function parseSitesFile(fileContent) {
+            const parsedSites = [];
+            const lines = fileContent.split('\n');
+            const separator = '|"';
+
+            lines.forEach(line => {
+                line = line.trim();
+                // Check if the line is valid and contains the separator
+                if (line && line.includes(separator)) {
+                    const separatorIndex = line.indexOf(separator);
+                    
+                    const name = line.substring(0, separatorIndex).trim();
+                    let url = line.substring(separatorIndex + separator.length).trim();
+                    
+                    // Remove the final closing quote
+                    if (url.endsWith('"')) {
+                        url = url.substring(0, url.length - 1);
+                    }
+                    
+                    if (name && url) {
+                        parsedSites.push({ name, url });
+                    }
+                }
+            });
+            return parsedSites;
+        }
+
+        /**
+         * Populates the dropdown menu with site options and loads the first one.
+         */
+        function populateDropdown(siteList) {
+            // Clear previous options
+            siteSelector.innerHTML = ''; 
+
+            if (siteList.length === 0) {
+                 const option = document.createElement('option');
+                option.textContent = "No Sites Found";
+                siteSelector.appendChild(option);
+                return;
+            }
+
+            // Add a default instruction option
+            const defaultOption = document.createElement('option');
+            defaultOption.value = "";
+            defaultOption.textContent = "Switch Site...";
+            siteSelector.appendChild(defaultOption);
+
+            siteList.forEach((site, index) => {
+                const option = document.createElement('option');
+                option.value = site.url;
+                option.textContent = site.name;
+                
+                // Load the first site automatically
+                if (index === 0) {
+                    option.selected = true;
+                    contentFrame.src = site.url;
+                }
+                siteSelector.appendChild(option);
+            });
+        }
+
+        /**
+         * Handles the change event on the dropdown to load the new website in the iframe.
+         */
+        function handleSiteChange() {
+            const selectedUrl = siteSelector.value;
+            if (selectedUrl) {
+                contentFrame.src = selectedUrl;
+            }
+        }
+
+        /**
+         * Initializes the application by fetching and parsing the site list.
+         */
+        async function initApp() {
+            // Attach event listener immediately
+            siteSelector.addEventListener('change', handleSiteChange);
+
+            try {
+                // Fetch the sites.txt file from the same directory
+                const response = await fetch('./sites.txt'); 
+
+                if (!response.ok) {
+                    // Show error if the file couldn't be loaded (e.g., 404 error)
+                    throw new Error(`Failed to load sites.txt: ${response.statusText}. Please check the file path.`);
+                }
+                
+                const fileContent = await response.text();
+                const parsedSiteList = parseSitesFile(fileContent);
+                
+                populateDropdown(parsedSiteList);
+
+            } catch (error) {
+                console.error("Error loading application data:", error.message);
+                // Display a user-friendly error in the selector
+                siteSelector.innerHTML = `<option>ERROR: ${error.message}</option>`;
+            }
+        }
+
+        // Initialize the application when the window loads
+        window.onload = initApp;
+    </script>
+
+</body>
+</html>
