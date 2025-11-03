@@ -1,5 +1,2 @@
-Google Search|"https://www.google.com"
 Wikipedia|"https://www.wikipedia.org"
-MDN Web Docs|"https://developer.mozilla.org"
 Example Site|"https://example.com"
-Video Stream|"https://www.youtube.com"
