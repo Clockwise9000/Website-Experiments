@@ -1,2 +1,0 @@
-Wikipedia|"https://www.wikipedia.org"
-Example Site|"https://example.com"
