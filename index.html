@@ -1,1 +1,548 @@
-<img src="/Alert.png" alt="alternatetext">
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <title>Google Scripts Multiplayer Square Game</title>
+  <style>
+    /* 🎨 CSS Variables for easy styling changes */
+    :root {
+      --bg-color: #333333; /* Dark gray background */
+      --canvas-border-color: #000000;
+      --canvas-border-thickness: 4px;
+      --button-bar-bg: rgba(0, 0, 0, 0.7);
+    }
+    html, body {
+      margin: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background-color: var(--bg-color);
+      font-family: sans-serif;
+    }
+    #game-container {
+      /* This container will manage the 4:3 aspect ratio */
+      position: relative;
+      width: 100%;
+      height: 100%;
+      max-width: calc((100vh - 2 * var(--canvas-border-thickness)) * 4 / 3);
+      max-height: calc((100vw - 2 * var(--canvas-border-thickness)) * 3 / 4);
+      box-sizing: border-box;
+      border: var(--canvas-border-thickness) solid var(--canvas-border-color);
+    }
+    #gameCanvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #notification-bar {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      width: 100px; /* Base size, will be scaled in JS */
+      height: 400px; /* Base size, will be scaled in JS */
+      display: flex;
+      flex-direction: column;
+      justify-content: space-around;
+      padding: 10px;
+      background-color: var(--button-bar-bg);
+      box-sizing: border-box;
+      z-index: 10;
+      opacity: 0.8;
+      transform-origin: bottom left;
+      /* Initial scaling will be set by JS on resize */
+    }
+    .notification-button {
+      width: 100%;
+      height: 50px;
+      margin: 5px 0;
+      border: none;
+      background-color: #555;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+      transition: background-color 0.2s;
+    }
+    .notification-button:hover {
+      background-color: #777;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    <div id="notification-bar">
+      </div>
+  </div>
+
+<script>
+// --- ⚙️ CLIENT-SIDE GAME VARIABLES (Top of Script) ---
+
+// Game/Canvas Dimensions (Logical 4:3 Aspect Ratio - This defines the internal coordinate system)
+const GAME_WIDTH = 800; // Logical width
+const GAME_HEIGHT = 600; // Logical height (4/3 of 800)
+
+// Player Variables
+const BASE_SPEED = 200; // Pixels per second in the logical 800x600 canvas
+const LOCAL_PLAYER_ID_KEY = 'player_square_id';
+const PLAYER_SIZE_LOGICAL = 30; // Size of the square in logical pixels
+
+// Network/Timing Variables
+const UPDATE_RATE_MS = 20; // Server update rate (for remote player interpolation)
+const ONLINE_CHECK_INTERVAL_MS = 1000; // Check "ONLINE variable" every second
+const OFFLINE_TIMEOUT_SECONDS = 3; // Time before offline notification appears (3000ms)
+const NOTIFICATION_DURATION_SECONDS = 2; // Duration for notification buttons (excluding offline)
+
+// Notification Variables (Affects all notifications)
+const NOTIFICATION_X_OFFSET_LOGICAL = 0; // X offset from player center
+const NOTIFICATION_Y_OFFSET_LOGICAL = -20; // Y offset from player center
+const NOTIFICATION_TEXT_SIZE_LOGICAL = 14;
+const OFFLINE_NOTIFICATION_TEXT = "🔴 OFFLINE";
+const BUTTON_NOTIFICATIONS = [
+  "!",
+  "?",
+  "Here!",
+  "Hello!",
+  "💤 AFK",
+];
+
+// Button Bar Variables (Base logical size)
+const BUTTON_BAR_BASE_WIDTH = 100;
+const BUTTON_BAR_BASE_HEIGHT = 400;
+
+// --- 🎮 CORE GAME SETUP ---
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const gameContainer = document.getElementById('game-container');
+const notificationBar = document.getElementById('notification-bar');
+
+let scaleFactor = 1; // Used to convert logical pixels to screen pixels
+let playerID = null;
+let localPlayer = {
+  id: -999, // Temporary ID
+  x: 50,
+  y: 50,
+  color: 'gray',
+  dx: 0, // direction X
+  dy: 0, // direction Y
+  targetX: 50, // For local movement, but useful for sending to server
+  targetY: 50,
+  lastSentUpdate: 0,
+  lastOnlineCheck: 0,
+  isOffline: false,
+  notificationTimer: 0, // Timer for temporary notifications
+  notificationText: "",
+  onlineCounter: 0, // Counter for offline check
+};
+let remotePlayers = {}; // Stores all remote player data for interpolation
+
+// Key State Tracking
+const keys = {
+  ArrowUp: false,
+  ArrowDown: false,
+  ArrowLeft: false,
+  ArrowRight: false
+};
+
+// --- 🌐 LOCAL STORAGE & INITIALIZATION ---
+
+/**
+ * Checks localStorage for a player ID and initializes or registers a new player.
+ */
+function initPlayer() {
+  const storedID = localStorage.getItem(LOCAL_PLAYER_ID_KEY);
+  if (storedID) {
+    playerID = parseInt(storedID);
+    localPlayer.id = playerID;
+    console.log("Found Player ID in localStorage:", playerID);
+    // Tell the server we are back
+    google.script.run.withSuccessHandler(handlePlayerState).loadPlayer(playerID);
+  } else {
+    // New player - request an ID and initial state from the server
+    console.log("No Player ID found. Requesting new ID...");
+    google.script.run.withSuccessHandler(registerPlayerSuccess).registerNewPlayer();
+  }
+}
+
+/**
+ * Handles success for registering a new player.
+ * @param {object} playerState - The initial state of the new player.
+ */
+function registerPlayerSuccess(playerState) {
+  playerID = playerState.id;
+  localStorage.setItem(LOCAL_PLAYER_ID_KEY, playerID);
+  localPlayer.id = playerID;
+  handlePlayerState(playerState);
+  console.log("New Player registered with ID:", playerID);
+}
+
+/**
+ * Applies the initial player state received from the server.
+ * @param {object} playerState - The initial player state.
+ */
+function handlePlayerState(playerState) {
+  localPlayer.x = playerState.x;
+  localPlayer.y = playerState.y;
+  localPlayer.targetX = playerState.x;
+  localPlayer.targetY = playerState.y;
+  localPlayer.color = playerState.color;
+  localPlayer.isOffline = false; // Player is online after a successful state load
+}
+
+// --- 🖼️ CANVAS AND ASPECT RATIO SCALING ---
+
+/**
+ * Resizes the canvas and game container to maintain a 4:3 aspect ratio
+ * and fit within the current window size.
+ */
+function resizeCanvas() {
+  const windowWidth = window.innerWidth;
+  const windowHeight = window.innerHeight;
+
+  const aspectRatio = GAME_WIDTH / GAME_HEIGHT;
+  let newWidth, newHeight;
+
+  // Calculate the maximum dimensions that fit within the window while maintaining 4:3
+  if (windowWidth / windowHeight > aspectRatio) {
+    // Window is wider than 4:3 (height is the limiting factor)
+    newHeight = windowHeight;
+    newWidth = newHeight * aspectRatio;
+  } else {
+    // Window is taller than 4:3 (width is the limiting factor)
+    newWidth = windowWidth;
+    newHeight = newWidth / aspectRatio;
+  }
+
+  // Set the container size, which has the black border and centering from CSS
+  gameContainer.style.width = `${newWidth}px`;
+  gameContainer.style.height = `${newHeight}px`;
+
+  // Set the canvas size to the container size
+  canvas.width = newWidth;
+  canvas.height = newHeight;
+
+  // Calculate the scale factor from logical to screen pixels
+  scaleFactor = newWidth / GAME_WIDTH;
+
+  // Scale the notification bar
+  notificationBar.style.transform = `scale(${scaleFactor})`;
+  // Adjust position of bar to logical bottom-left (relative to its scaled size)
+  notificationBar.style.left = `0px`;
+  notificationBar.style.bottom = `0px`;
+
+  // Redraw everything after resize
+  draw();
+}
+
+// --- 🏃 MOVEMENT AND INPUT LOGIC ---
+
+/**
+ * Handles key down events to set movement direction flags.
+ * @param {KeyboardEvent} e
+ */
+function handleKeyDown(e) {
+  if (keys.hasOwnProperty(e.key)) {
+    // Prevents key repeat from firing the movement logic multiple times
+    if (!keys[e.key]) {
+      keys[e.key] = true;
+      updateMovementDirection();
+    }
+    e.preventDefault(); // Stop scrolling with arrow keys
+  }
+}
+
+/**
+ * Handles key up events to clear movement direction flags.
+ * @param {KeyboardEvent} e
+ */
+function handleKeyUp(e) {
+  if (keys.hasOwnProperty(e.key)) {
+    keys[e.key] = false;
+    updateMovementDirection();
+  }
+}
+
+/**
+ * Updates the localPlayer's directional vectors (dx, dy) based on pressed keys.
+ */
+function updateMovementDirection() {
+  localPlayer.dx = 0;
+  localPlayer.dy = 0;
+
+  if (keys.ArrowUp) localPlayer.dy -= 1;
+  if (keys.ArrowDown) localPlayer.dy += 1;
+  if (keys.ArrowLeft) localPlayer.dx -= 1;
+  if (keys.ArrowRight) localPlayer.dx += 1;
+
+  // Normalize the vector for diagonal movement to prevent extra speed
+  if (localPlayer.dx !== 0 && localPlayer.dy !== 0) {
+    const magnitude = Math.sqrt(localPlayer.dx * localPlayer.dx + localPlayer.dy * localPlayer.dy);
+    localPlayer.dx /= magnitude;
+    localPlayer.dy /= magnitude;
+  }
+}
+
+/**
+ * Calculates and applies the local player's movement based on time elapsed.
+ * @param {number} deltaSeconds - Time elapsed since the last frame in seconds.
+ */
+function updateLocalPlayer(deltaSeconds) {
+  if (localPlayer.id === null || localPlayer.isOffline) return; // Don't move if not initialized or offline
+
+  const speed = BASE_SPEED * deltaSeconds;
+  localPlayer.targetX += localPlayer.dx * speed;
+  localPlayer.targetY += localPlayer.dy * speed;
+
+  // Clamp position within the logical game bounds
+  localPlayer.targetX = Math.max(PLAYER_SIZE_LOGICAL / 2, Math.min(GAME_WIDTH - PLAYER_SIZE_LOGICAL / 2, localPlayer.targetX));
+  localPlayer.targetY = Math.max(PLAYER_SIZE_LOGICAL / 2, Math.min(GAME_HEIGHT - PLAYER_SIZE_LOGICAL / 2, localPlayer.targetY));
+
+  // Local position immediately updates to the target (no local rubberbanding)
+  localPlayer.x = localPlayer.targetX;
+  localPlayer.y = localPlayer.targetY;
+}
+
+// --- ☁️ SERVER COMMUNICATION AND INTERPOLATION ---
+
+/**
+ * Sends local player's state (position, notification) to the server.
+ */
+function sendPlayerUpdate() {
+  if (localPlayer.id === null) return;
+
+  const now = Date.now();
+  if (now - localPlayer.lastSentUpdate < UPDATE_RATE_MS) {
+    return; // Respect the update rate limit
+  }
+  localPlayer.lastSentUpdate = now;
+
+  // The 'ONLINE variable' is implicitly set to 1 by making this call
+  localPlayer.onlineCounter = OFFLINE_TIMEOUT_SECONDS;
+  localPlayer.isOffline = false;
+
+  const data = {
+    id: localPlayer.id,
+    x: localPlayer.x,
+    y: localPlayer.y,
+    // Notification data is sent only if there's an active non-offline notification
+    notification: localPlayer.notificationText
+  };
+
+  google.script.run.withSuccessHandler(receiveAllPlayerUpdates).updatePlayer(data);
+}
+
+/**
+ * Receives all players' states from the server.
+ * @param {object} data - Object containing the players and the time.
+ */
+function receiveAllPlayerUpdates(data) {
+  const serverTime = data.time;
+  const players = data.players;
+
+  // Step 1: Update remote players
+  for (const newPlayer of players) {
+    // Ignore update for the local player
+    if (newPlayer.id === localPlayer.id) continue;
+
+    if (!remotePlayers[newPlayer.id]) {
+      // New player - initialize with current state
+      remotePlayers[newPlayer.id] = {
+        id: newPlayer.id,
+        x: newPlayer.x,
+        y: newPlayer.y,
+        prevX: newPlayer.x,
+        prevY: newPlayer.y,
+        targetX: newPlayer.x,
+        targetY: newPlayer.y,
+        color: newPlayer.color,
+        notificationText: newPlayer.notificationText,
+        lastUpdate: serverTime
+      };
+    } else {
+      // Existing player - set new target for interpolation
+      const player = remotePlayers[newPlayer.id];
+      player.prevX = player.x;
+      player.prevY = player.y;
+      player.targetX = newPlayer.x;
+      player.targetY = newPlayer.y;
+      player.color = newPlayer.color;
+      player.notificationText = newPlayer.notificationText;
+      player.lastUpdate = serverTime;
+    }
+  }
+
+  // Step 2: Clean up offline players
+  const playerIDs = players.map(p => p.id);
+  for (const id in remotePlayers) {
+    if (!playerIDs.includes(parseInt(id))) {
+      // Check for 'offline' status/timeout logic here in a more complete system
+      // For this simplified example, we'll just remove them if not in the current update
+      // A more robust system would need a dedicated offline status flag from the server.
+      // Assuming the server only returns ONLINE players for simplicity.
+      delete remotePlayers[id];
+    }
+  }
+}
+
+/**
+ * Interpolates remote player positions to smooth movement.
+ * @param {number} deltaSeconds - Time elapsed since the last frame in seconds.
+ */
+function updateRemotePlayers(deltaSeconds) {
+  const interpFactor = deltaSeconds * (1000 / UPDATE_RATE_MS); // e.g. if delta is 20ms, factor is 1
+  const t = Math.min(1, interpFactor * 0.9); // Linear Interpolation factor (L-I)
+
+  for (const id in remotePlayers) {
+    const player = remotePlayers[id];
+    player.x = player.x + (player.targetX - player.x) * t;
+    player.y = player.y + (player.targetY - player.y) * t;
+  }
+}
+
+// --- 🔔 NOTIFICATION & ONLINE STATUS LOGIC ---
+
+/**
+ * Sends a notification to other players.
+ * @param {number} index - Index of the notification to send (0-4).
+ */
+function sendNotification(index) {
+  if (localPlayer.id === null) return;
+  const text = BUTTON_NOTIFICATIONS[index];
+  if (text) {
+    localPlayer.notificationText = text;
+    localPlayer.notificationTimer = NOTIFICATION_DURATION_SECONDS;
+    // The next sendPlayerUpdate will carry the notification
+  }
+}
+
+/**
+ * Updates notification timers and checks for offline status.
+ * @param {number} deltaSeconds - Time elapsed since the last frame in seconds.
+ */
+function updateNotifications(deltaSeconds) {
+  // Local Player Notification Timer
+  if (localPlayer.notificationTimer > 0) {
+    localPlayer.notificationTimer -= deltaSeconds;
+    if (localPlayer.notificationTimer <= 0) {
+      localPlayer.notificationText = ""; // Clear the notification
+    }
+  }
+
+  // Offline Check (This check is also handled implicitly in sendPlayerUpdate)
+  const now = Date.now();
+  if (now - localPlayer.lastOnlineCheck > ONLINE_CHECK_INTERVAL_MS) {
+    // If the server update hasn't run (implicitly setting onlineCounter), decrement.
+    if (localPlayer.onlineCounter > 0) {
+      localPlayer.onlineCounter--;
+    } else {
+      localPlayer.isOffline = true;
+    }
+    localPlayer.lastOnlineCheck = now;
+  }
+}
+
+// --- 🎨 RENDERING ---
+
+/**
+ * Draws a single player square and its notification.
+ * @param {object} player - The player object to draw.
+ */
+function drawPlayer(player) {
+  // Convert logical coordinates to screen coordinates
+  const screenX = player.x * scaleFactor;
+  const screenY = player.y * scaleFactor;
+  const halfSize = (PLAYER_SIZE_LOGICAL / 2) * scaleFactor;
+  const size = PLAYER_SIZE_LOGICAL * scaleFactor;
+
+  // Draw the square
+  ctx.fillStyle = player.color;
+  ctx.fillRect(screenX - halfSize, screenY - halfSize, size, size);
+
+  // Draw notification (including offline)
+  let notificationText = player.notificationText;
+  if (player.id === localPlayer.id && localPlayer.isOffline) {
+    notificationText = OFFLINE_NOTIFICATION_TEXT;
+  }
+
+  if (notificationText) {
+    ctx.fillStyle = 'white';
+    ctx.font = `${NOTIFICATION_TEXT_SIZE_LOGICAL * scaleFactor}px sans-serif`;
+    ctx.textAlign = 'center';
+    const textScreenX = screenX + NOTIFICATION_X_OFFSET_LOGICAL * scaleFactor;
+    const textScreenY = screenY + NOTIFICATION_Y_OFFSET_LOGICAL * scaleFactor;
+    ctx.fillText(notificationText, textScreenX, textScreenY);
+  }
+}
+
+/**
+ * Main drawing function.
+ */
+function draw() {
+  // Clear the canvas
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Draw remote players
+  for (const id in remotePlayers) {
+    drawPlayer(remotePlayers[id]);
+  }
+
+  // Draw local player (always on top)
+  if (localPlayer.id !== null) {
+    drawPlayer(localPlayer);
+  }
+}
+
+// --- 🔄 GAME LOOP ---
+let lastTime = 0;
+
+/**
+ * The main game loop driven by requestAnimationFrame.
+ * @param {number} time - High resolution time stamp.
+ */
+function gameLoop(time) {
+  const deltaSeconds = (time - lastTime) / 1000;
+  lastTime = time;
+
+  // 1. Update
+  updateLocalPlayer(deltaSeconds);
+  updateRemotePlayers(deltaSeconds);
+  updateNotifications(deltaSeconds);
+
+  // 2. Network Update (Scheduled to run at UPDATE_RATE_MS)
+  sendPlayerUpdate();
+
+  // 3. Draw
+  draw();
+
+  // 4. Loop
+  requestAnimationFrame(gameLoop);
+}
+
+// --- 🚀 INITIALIZATION CALLS ---
+
+// Add window event listeners
+window.addEventListener('resize', resizeCanvas);
+document.addEventListener('keydown', handleKeyDown);
+document.addEventListener('keyup', handleKeyUp);
+
+// Dynamically create the notification buttons
+BUTTON_NOTIFICATIONS.forEach((text, index) => {
+  const button = document.createElement('button');
+  button.className = 'notification-button';
+  button.textContent = `(${index}) ${text}`;
+  button.onclick = () => sendNotification(index);
+  notificationBar.appendChild(button);
+});
+
+// Start the game
+resizeCanvas(); // Set initial canvas size
+initPlayer();
+requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
